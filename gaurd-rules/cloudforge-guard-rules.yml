@@ -1,0 +1,223 @@
+rules:
+  # Encryption Rules
+  - name: S3 Bucket Encryption Required
+    resource: AWS::S3::Bucket
+    check: property_exists
+    property: BucketEncryption
+    severity: MEDIUM
+    message: "S3 bucket must have encryption enabled"
+
+  - name: RDS Storage Encryption Required
+    resource: AWS::RDS::DBInstance
+    check: property_equals
+    property: StorageEncrypted
+    value: true
+    severity: HIGH
+    message: "RDS instance must have storage encryption enabled"
+
+  - name: EBS Volume Encryption Required
+    resource: AWS::EC2::Volume
+    check: property_equals
+    property: Encrypted
+    value: true
+    severity: HIGH
+    message: "EBS volumes must be encrypted"
+
+  # Public Access Rules
+  - name: S3 Public Access Block Required
+    resource: AWS::S3::Bucket
+    check: property_exists
+    property: PublicAccessBlockConfiguration
+    severity: MEDIUM
+    message: "S3 bucket must have PublicAccessBlockConfiguration defined"
+
+  - name: No Public Security Group Ingress
+    resource: AWS::EC2::SecurityGroup
+    check: property_not_contains
+    property: SecurityGroupIngress[*].CidrIp
+    value: "0.0.0.0/0"
+    severity: HIGH
+    message: "Security group must not allow ingress from 0.0.0.0/0"
+
+  # Logging Rules
+  # - name: S3 Bucket Logging Required
+  #   resource: AWS::S3::Bucket
+  #   check: property_exists
+  #   property: LoggingConfiguration
+  #   severity: MEDIUM
+  #   message: "S3 bucket should have access logging enabled"
+
+  - name: CloudTrail Logging Enabled
+    resource: AWS::CloudTrail::Trail
+    check: property_equals
+    property: IsLogging
+    value: true
+    severity: HIGH
+    message: "CloudTrail must have logging enabled"
+
+  # Tagging Rules
+  # - name: Required Tags Present
+  #   resource: "*"
+  #   check: tags_exist
+  #   tags:
+  #     - Environment
+  #     - Owner
+  #   severity: MEDIUM
+  #   message: "Resources must have 'Environment' and 'Owner' tags"
+
+  # Instance Type Rules
+  - name: RDS Instance Type Allowed
+    resource: AWS::RDS::DBInstance
+    check: property_in_list
+    property: DBInstanceClass
+    values:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+      - db.t3.large
+      - db.r5.large
+      - db.r5.xlarge
+      - db.r6g.large
+      - db.r6g.xlarge
+    severity: MEDIUM
+    message: "RDS instance class must be from the approved list"
+
+  # Deletion Protection
+  - name: RDS Deletion Protection Required
+    resource: AWS::RDS::DBInstance
+    check: property_equals
+    property: DeletionProtection
+    value: true
+    severity: MEDIUM
+    message: "RDS instance should have deletion protection enabled"
+
+  - name: RDS Multi-AZ Required
+    resource: AWS::RDS::DBInstance
+    check: property_equals
+    property: MultiAZ
+    value: true
+    severity: HIGH
+    message: "RDS instance must have Multi-AZ enabled for high availability"
+
+  - name: RDS Backup Retention Required
+    resource: AWS::RDS::DBInstance
+    check: property_exists
+    property: BackupRetentionPeriod
+    severity: HIGH
+    message: "RDS instance must have backup retention period configured"
+
+  - name: S3 Versioning Required
+    resource: AWS::S3::Bucket
+    check: property_exists
+    property: VersioningConfiguration
+    severity: HIGH
+    message: "S3 bucket should have versioning enabled"
+
+  # Lambda Rules
+  - name: Lambda Runtime Must Be Supported
+    resource: AWS::Lambda::Function
+    check: property_not_in_list
+    property: Runtime
+    values:
+      - python2.7
+      - python3.6
+      - python3.7
+      - nodejs8.10
+      - nodejs10.x
+      - nodejs12.x
+      - dotnetcore2.1
+      - dotnetcore3.1
+      - ruby2.5
+      - ruby2.7
+      - java8
+    severity: HIGH
+    message: "Lambda function is using a deprecated runtime"
+
+  - name: Lambda Timeout Configured
+    resource: AWS::Lambda::Function
+    check: property_exists
+    property: Timeout
+    severity: HIGH
+    message: "Lambda function should have a timeout configured (default is 3s)"
+
+  - name: Lambda Memory Configured
+    resource: AWS::Lambda::Function
+    check: property_exists
+    property: MemorySize
+    severity: MEDIUM
+    message: "Lambda function should have memory size configured (default is 128MB)"
+
+  # ECS Rules
+  - name: ECS Task CPU Required
+    resource: AWS::ECS::TaskDefinition
+    check: property_exists
+    property: Cpu
+    severity: HIGH
+    message: "ECS task definition must have CPU limits configured"
+
+  - name: ECS Task Memory Required
+    resource: AWS::ECS::TaskDefinition
+    check: property_exists
+    property: Memory
+    severity: HIGH
+    message: "ECS task definition must have memory limits configured"
+
+  - name: ECS Task Must Use Fargate
+    resource: AWS::ECS::TaskDefinition
+    check: property_contains
+    property: RequiresCompatibilities
+    value: FARGATE
+    severity: MEDIUM
+    message: "ECS task definition must use Fargate launch type"
+
+  - name: ECS Task Network Mode Must Be awsvpc
+    resource: AWS::ECS::TaskDefinition
+    check: property_equals
+    property: NetworkMode
+    value: awsvpc
+    severity: MEDIUM
+    message: "ECS task definition must use awsvpc network mode"
+
+     # SNS Rules
+  - name: SNS Topic Encryption Required
+    resource: AWS::SNS::Topic
+    check: property_exists
+    property: KmsMasterKeyId
+    severity: HIGH
+    message: "SNS topic must have encryption enabled with KMS key"
+
+  # EKS Rules
+  - name: EKS Public Endpoint Disabled
+    resource: AWS::EKS::Cluster
+    check: property_equals
+    property: ResourcesVpcConfig.EndpointPublicAccess
+    value: false
+    severity: HIGH
+    message: "EKS cluster must have public endpoint access disabled"
+
+  - name: EKS Encryption Required
+    resource: AWS::EKS::Cluster
+    check: property_exists
+    property: EncryptionConfig
+    severity: HIGH
+    message: "EKS cluster must have encryption enabled"
+
+  - name: EKS Kubernetes Version Not Outdated
+    resource: AWS::EKS::Cluster
+    check: property_not_in_list
+    property: Version
+    values:
+      - "1.23"
+      - "1.24"
+      - "1.25"
+      - "1.26"
+      - "1.27"
+    severity: HIGH
+    message: "EKS cluster is using an outdated Kubernetes version"
+
+  - name: EKS Security Group Configured
+    resource: AWS::EKS::Cluster
+    check: property_exists
+    property: ResourcesVpcConfig.SecurityGroupIds
+    severity: HIGH
+    message: "EKS cluster must have security groups configured"
