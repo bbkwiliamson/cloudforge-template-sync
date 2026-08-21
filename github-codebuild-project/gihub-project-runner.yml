@@ -1,0 +1,375 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CodeBuild project configured as a GitHub Actions self-hosted runner
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: GitHub Configuration
+        Parameters:
+          - GitHubOrg
+      - Label:
+          default: CodeBuild Configuration
+        Parameters:
+          - TeamName
+          - EnvironmentType
+          - GitHubECRImage
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VpcId
+          - SubnetIds
+      - Label:
+          default: Tagging
+        Parameters:
+          - TeamEmail
+          - GroupName
+          - UTRKey
+          - TCRKey
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: standardbank-ppb-digital-platforms
+    Description: GitHub organization name
+  TeamEmail:
+    Type: String
+    Description: Team email owning this resource
+  UTRKey:
+    Type: String
+    Description: UTRKey owning this resource for billing
+  TCRKey:
+    Type: String
+    Description: TCRKey owning this resource for billing
+  GroupName:
+    Type: String
+    Description: Group name owning this resource
+  EnvironmentType:
+    Type: String
+    Description: CodeBuild environment type
+    Default: LINUX_CONTAINER
+    AllowedValues:
+      - LINUX_CONTAINER
+      - LINUX_GPU_CONTAINER
+      - ARM_CONTAINER
+      - WINDOWS_SERVER_2019_CONTAINER
+      - WINDOWS_SERVER_2022_CONTAINER
+  GitHubECRImage:
+    Type: String
+    Description: the base image for the github runner
+  TeamName:
+    Type: String
+    Default: dp-systems-enablement
+    Description: Group name owning this resource; e.g; team-name(follow same format)
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for the CodeBuild project
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs for the CodeBuild project
+
+Conditions:
+  IsWindows: !Or
+    - !Equals [!Ref EnvironmentType, WINDOWS_SERVER_2019_CONTAINER]
+    - !Equals [!Ref EnvironmentType, WINDOWS_SERVER_2022_CONTAINER]
+
+Resources:
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub Bounded-GitHubActionsRole-${TeamName}-Github-Runners
+      PermissionsBoundary: !Sub arn:aws:iam::${AWS::AccountId}:policy/BoundedPermissionsPolicy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/Bounded-Codebuild-Role
+            Action: 
+              - sts:AssumeRole
+              - sts:TagSession
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+              - sts:TagSession
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+              - sts:TagSession
+            Condition:
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+      ManagedPolicyArns:
+        - !Ref CodeBuildRunnerPolicy
+      Tags:
+        - Key: Team-Email
+          Value: !Ref TeamEmail
+        - Key: Group-Name
+          Value: !Ref GroupName
+        - Key: Team-Name
+          Value: !Ref TeamName
+        - Key: UTRKey
+          Value: !Ref UTRKey
+        - Key: TCRKey
+          Value: !Ref TCRKey
+
+  CodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${TeamName}-codebuild-runner-sg
+      GroupDescription: Security group for CodeBuild GitHub Actions runner
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 4000
+          ToPort: 4000
+          CidrIp: 10.109.100.0/24
+          Description: Allow TCP on port 4000 from 10.109.100.0/24
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 172.16.0.0/12
+          Description: Allow TCP on port 8080 from 172.16.0.0/12
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 10.109.100.0/24
+          Description: Allow TCP on port 8080 from 10.109.100.0/24
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 10.109.100.0/24
+          Description: Allow TCP on port 3000 from 10.109.100.0/24
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 172.16.0.0/12
+          Description: Allow TCP on port 3000 from 172.16.0.0/12
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound TCP traffic
+      Tags:
+        - Key: Name
+          Value: !Sub ${TeamName}-codebuild-runner-sg
+        - Key: Team-Email
+          Value: !Ref TeamEmail
+        - Key: Group-Name
+          Value: !Ref GroupName
+        - Key: Team-Name
+          Value: !Ref TeamName
+        - Key: UTRKey
+          Value: !Ref UTRKey
+        - Key: TCRKey
+          Value: !Ref TCRKey
+
+  CodeBuildRunnerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub Bounded-GitHubActionsRunner-${TeamName}-Policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Logs
+            Effect: Allow
+            Action:
+              - logs:*
+            Resource: '*'
+          - Sid: ECR
+            Effect: Allow
+            Action:
+              - ecr:*
+            Resource: '*'
+          - Sid: ECS
+            Effect: Allow
+            Action:
+              - ecs:*
+            Resource: '*'
+          - Sid: SecretsManager
+            Effect: Allow
+            Action:
+              - secretsmanager:*
+            Resource: '*'
+          - Sid: RDS
+            Effect: Allow
+            Action:
+              - rds:*
+            Resource: '*'
+          - Sid: CloudFormation
+            Effect: Allow
+            Action:
+              - cloudformation:*
+            Resource: '*'
+          - Sid: S3
+            Effect: Allow
+            Action:
+              - s3:*
+            Resource: '*'
+          - Sid: EC2
+            Effect: Allow
+            Action:
+              - ec2:*
+            Resource: '*'
+          - Sid: KMS
+            Effect: Allow
+            Action:
+              - kms:*
+            Resource: '*'
+          - Sid: SNS
+            Effect: Allow
+            Action:
+              - sns:*
+            Resource: '*'
+          - Sid: SQS
+            Effect: Allow
+            Action:
+              - sqs:*
+            Resource: '*'
+          - Sid: CodePipeline
+            Effect: Allow
+            Action:
+              - codepipeline:*
+              - codebuild:*
+              - codecommit:*
+              - codedeploy:*
+            Resource: '*'
+          - Sid: IAM
+            Effect: Allow
+            Action:
+              - iam:*
+            Resource: '*'
+          - Sid: STS
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+              - sts:AssumeRoleWithWebIdentity
+              - sts:TagSession
+            Resource: '*'
+          - Sid: OIDC
+            Effect: Allow
+            Action:
+              - iam:ListOpenIDConnectProviderTags
+              - iam:GetOpenIDConnectProvider
+            Resource: arn:aws:iam::573185292006:oidc-provider/token.actions.githubusercontent.com
+          - Sid: OIDCProviders
+            Effect: Allow
+            Action: iam:ListOpenIDConnectProviders
+            Resource: '*'
+          - Sid: AssumeTerraformRole
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+              - s3:ListBucket
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+            Resource:
+              - arn:aws:iam::866715056275:role/Bounded_TerraformBackendAccessRole
+              - arn:aws:dynamodb:af-south-1:866715056275:table/zerobilling-terraform-state
+              - arn:aws:s3:::accesslogsafszbbucket-dev/*
+              - arn:aws:s3:::accesslogsafszbbucket/*
+              - arn:aws:s3:::accesslogsafszbbucket-dev
+              - arn:aws:s3:::accesslogsafszbbucket
+
+  CodeBuildGitHubRunner:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${TeamName}-iac-runner
+      Description: !Sub GitHub Actions self-hosted runner for ${TeamName} repository
+      ServiceRole: !Sub arn:aws:iam::${AWS::AccountId}:role/Bounded-Codebuild-Role
+      Visibility: PRIVATE
+      Source:
+        Type: GITHUB
+        Location: CODEBUILD_DEFAULT_WEBHOOK_SOURCE_LOCATION
+        BuildSpec: !If
+          - IsWindows
+          - |
+            version: 0.2
+            phases:
+              pre_build:
+                commands:
+                  - $account_id = aws sts get-caller-identity --query Account --output text
+                  - $ecr_password = aws ecr get-login-password --region $env:AWS_DEFAULT_REGION
+                  - $ecr_password | docker login --username AWS --password-stdin "$account_id.dkr.ecr.$env:AWS_DEFAULT_REGION.amazonaws.com"
+          - |
+            version: 0.2
+            env:
+              exported-variables:
+                - DOCKER_HOST
+            phases:
+              pre_build:
+                commands:
+                  - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+                 
+      Environment:
+        Type: !Ref EnvironmentType
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: !Ref GitHubECRImage
+        PrivilegedMode: true
+      VpcConfig:
+        VpcId: !Ref VpcId
+        Subnets: !Ref SubnetIds
+        SecurityGroupIds:
+          - !Ref CodeBuildSecurityGroup
+      Triggers:
+        Webhook: true
+        ScopeConfiguration:
+          Name: !Ref GitHubOrg
+          Scope: GITHUB_ORGANIZATION
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: WORKFLOW_JOB_QUEUED
+            - Type: REPOSITORY_NAME
+              Pattern: ^systems_enablement
+              ExcludeMatchedPattern: false
+          - - Type: EVENT
+              Pattern: WORKFLOW_JOB_QUEUED
+            - Type: REPOSITORY_NAME
+              Pattern: ^systems-enablement
+              ExcludeMatchedPattern: false
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Sub /aws/codebuild/${TeamName}-iac-runner
+      Tags:
+        - Key: Team-Email
+          Value: !Ref TeamEmail
+        - Key: Group-Name
+          Value: !Ref GroupName
+        - Key: Team-Name
+          Value: !Ref TeamName
+        - Key: UTRKey
+          Value: !Ref UTRKey
+        - Key: TCRKey
+          Value: !Ref TCRKey
+
+Outputs:
+  CodeBuildProjectName:
+    Value: !Ref CodeBuildGitHubRunner
+    Description: CodeBuild project name (must match runs-on label in workflow)
+  CodeBuildProjectArn:
+    Value: !GetAtt CodeBuildGitHubRunner.Arn
+  ServiceRoleArn:
+    Value: !GetAtt CodeBuildServiceRole.Arn
+  ServiceRoleName:
+    Value: !Ref CodeBuildServiceRole
+  SecurityGroupId:
+    Value: !Ref CodeBuildSecurityGroup
+    Description: Security group created for the CodeBuild runner
+  VpcId:
+    Value: !Ref VpcId
+  SubnetIds:
+    Value: !Join [',', !Ref SubnetIds]
