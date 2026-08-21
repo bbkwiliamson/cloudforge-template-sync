@@ -1,0 +1,239 @@
+Description: CloudFormation template for rotating DB2 credentials via Secrets Manager native rotation
+
+Parameters:
+  SecretName:
+    Type: String
+    Description: Name of the Secrets Manager secret containing the team's DB2 user credentials
+  DBSecretName:
+    Type: String
+    Description: Name of the Secrets Manager secret containing the admin service user credentials (used to connect and change passwords)
+    Default: devops/db2-rotate/admin-credentials
+  FunctionPrefix:
+    Type: String
+    Description: A function prefix for the particular lambda (e.g. team-alpha)
+  RotationDays:
+    Type: Number
+    Description: Number of days between automatic rotations
+    Default: 365
+
+Resources:
+  # The rotation Lambda — Secrets Manager invokes this with the 4-step protocol
+  RotateDB2CredentialsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Timeout: 60
+      FunctionName: !Sub '${FunctionPrefix}-RotateDB2CredentialsFunction'
+      Description: 'Secrets Manager rotation function — rotates a DB2 user password using the admin service account'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/Bounded-Db2PasswordRotateFunctionRole
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import json
+          import ibm_db
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          secrets_client = boto3.client('secretsmanager')
+
+
+          def lambda_handler(event, context):
+              """
+              Secrets Manager rotation handler.
+
+              Secrets Manager calls this Lambda 4 times per rotation, once for each step:
+                1. createSecret  — generate a new password, store as AWSPENDING
+                2. setSecret     — connect to DB2 as admin, change the user's password
+                3. testSecret    — connect to DB2 as the user with the new password to verify
+                4. finishSecret  — promote AWSPENDING to AWSCURRENT
+
+              If any step fails, Secrets Manager does NOT promote the new password,
+              so the secret and DB2 stay in sync.
+              """
+              secret_arn = event['SecretId']
+              token = event['ClientRequestToken']
+              step = event['Step']
+
+              # Validate the secret version exists and is staged correctly
+              metadata = secrets_client.describe_secret(SecretId=secret_arn)
+              if not metadata.get('RotationEnabled'):
+                  raise ValueError(f"Secret {secret_arn} does not have rotation enabled.")
+
+              versions = metadata['VersionIdsToStages']
+              if token not in versions:
+                  raise ValueError(f"Secret version {token} has no stage for rotation of secret {secret_arn}.")
+
+              if 'AWSCURRENT' in versions[token]:
+                  logger.info(f"Secret version {token} already set as AWSCURRENT for {secret_arn}. Nothing to do.")
+                  return
+
+              if 'AWSPENDING' not in versions[token]:
+                  raise ValueError(f"Secret version {token} not set as AWSPENDING for rotation of secret {secret_arn}.")
+
+              # Dispatch to the appropriate step
+              if step == 'createSecret':
+                  create_secret(secret_arn, token)
+              elif step == 'setSecret':
+                  set_secret(secret_arn, token)
+              elif step == 'testSecret':
+                  test_secret(secret_arn, token)
+              elif step == 'finishSecret':
+                  finish_secret(secret_arn, token)
+              else:
+                  raise ValueError(f"Invalid step parameter: {step}")
+
+
+          def create_secret(secret_arn, token):
+              """Step 1: Generate a new password and store it as AWSPENDING."""
+              # Check if a version already exists for this token (retry scenario)
+              try:
+                  secrets_client.get_secret_value(SecretId=secret_arn, VersionId=token, VersionStage='AWSPENDING')
+                  logger.info(f"createSecret: AWSPENDING already exists for token {token}. Reusing.")
+                  return
+              except Exception:
+                  pass
+
+              current = secrets_client.get_secret_value(SecretId=secret_arn, VersionStage='AWSCURRENT')
+              secret_dict = json.loads(current['SecretString'])
+
+              # Generate new password (alpha only, 16 chars — same as original)
+              resp = secrets_client.get_random_password(
+                  ExcludeNumbers=True,
+                  ExcludePunctuation=True,
+                  PasswordLength=16
+              )
+              secret_dict['password'] = resp['RandomPassword']
+
+              # Store as AWSPENDING (handle retry where token already exists)
+              try:
+                  secrets_client.put_secret_value(
+                      SecretId=secret_arn,
+                      ClientRequestToken=token,
+                      SecretString=json.dumps(secret_dict),
+                      VersionStages=['AWSPENDING']
+                  )
+                  logger.info(f"createSecret: Stored new password as AWSPENDING for {secret_arn}.")
+              except secrets_client.exceptions.ResourceExistsException:
+                  logger.info(f"createSecret: Token {token} already exists. Reusing existing pending version.")
+                  return
+
+
+          def set_secret(secret_arn, token):
+              """Step 2: Connect to DB2 as admin and change the team user's password."""
+              # Get the pending secret (contains the new password)
+              pending = secrets_client.get_secret_value(
+                  SecretId=secret_arn, VersionId=token, VersionStage='AWSPENDING'
+              )
+              pending_dict = json.loads(pending['SecretString'])
+              username = pending_dict['username']
+              new_password = pending_dict['password']
+
+              # Get admin service user credentials
+              db_secret_name = os.environ['DBSecretName']
+              db_secret_response = secrets_client.get_secret_value(SecretId=db_secret_name)
+              db_secret = json.loads(db_secret_response['SecretString'])
+
+              # Connect to DB2 as admin and change the user's password
+              conn_str = (
+                  f"DATABASE=RDSADMIN;"
+                  f"HOSTNAME=db2sbgst.czwgbrhygi9q.af-south-1.rds.amazonaws.com;"
+                  f"PORT=53020;"
+                  f"PROTOCOL=TCPIP;"
+                  f"SECURITY=SSL;"
+                  f"SSLServerCertificate=/opt/python/clidriver/certs/af-south-1-bundle.pem;"
+                  f"UID={db_secret['username']};"
+                  f"PWD={db_secret['password']};"
+              )
+              conn = ibm_db.connect(conn_str, "", "")
+              try:
+                  username_upper = username.upper()
+                  safe_password = new_password.replace("'", "''")
+                  sql = f"CALL RDSADMIN.CHANGE_PASSWORD('{username_upper}', '{safe_password}');"
+                  ibm_db.exec_immediate(conn, sql)
+                  logger.info(f"setSecret: Changed password in DB2 for user {username_upper}.")
+              finally:
+                  ibm_db.close(conn)
+
+
+          def test_secret(secret_arn, token):
+              """Step 3: Verify the new password works by connecting as the team user."""
+              import time
+              # Allow time for password change to propagate in DB2
+              time.sleep(20)
+
+              pending = secrets_client.get_secret_value(
+                  SecretId=secret_arn, VersionId=token, VersionStage='AWSPENDING'
+              )
+              pending_dict = json.loads(pending['SecretString'])
+
+              # Try to connect as the team user with the new password
+              conn_str = (
+                  f"DATABASE=SBGDB;"
+                  f"HOSTNAME=db2sbgst.czwgbrhygi9q.af-south-1.rds.amazonaws.com;"
+                  f"PORT=53020;"
+                  f"PROTOCOL=TCPIP;"
+                  f"SECURITY=SSL;"
+                  f"SSLServerCertificate=/opt/python/clidriver/certs/af-south-1-bundle.pem;"
+                  f"UID={pending_dict['username']};"
+                  f"PWD={pending_dict['password']};"
+              )
+              conn = ibm_db.connect(conn_str, "", "")
+              ibm_db.close(conn)
+              logger.info(f"testSecret: Verified new credentials for {pending_dict['username']}.")
+
+
+          def finish_secret(secret_arn, token):
+              """Step 4: Promote AWSPENDING to AWSCURRENT."""
+              metadata = secrets_client.describe_secret(SecretId=secret_arn)
+              current_version = None
+              for version_id, stages in metadata['VersionIdsToStages'].items():
+                  if 'AWSCURRENT' in stages:
+                      if version_id == token:
+                          logger.info(f"finishSecret: Version {token} already AWSCURRENT.")
+                          return
+                      current_version = version_id
+                      break
+
+              secrets_client.update_secret_version_stage(
+                  SecretId=secret_arn,
+                  VersionStage='AWSCURRENT',
+                  MoveToVersionId=token,
+                  RemoveFromVersionId=current_version
+              )
+              logger.info(f"finishSecret: Promoted {token} to AWSCURRENT for {secret_arn}.")
+
+      Environment:
+        Variables:
+          DBSecretName: !Ref DBSecretName
+          LD_LIBRARY_PATH: '/opt/python/lib64:/opt/python/lib'
+      Layers:
+        - !ImportValue IbmDbLayerArn
+      VpcConfig:
+        SubnetIds:
+          - subnet-0d54e7dcadc6021c3
+          - subnet-0296da703cae16215
+        SecurityGroupIds:
+          - sg-08d49531574fd2df9
+
+  # Grant Secrets Manager permission to invoke this Lambda
+  RotationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RotateDB2CredentialsFunction
+      Action: lambda:InvokeFunction
+      Principal: secretsmanager.amazonaws.com
+
+  # Attach this Lambda as the rotation function for the team's secret
+  # This tells Secrets Manager: "use this Lambda to rotate this secret every N days"
+  SecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn: RotationPermission
+    Properties:
+      SecretId: !Ref SecretName
+      RotationLambdaARN: !GetAtt RotateDB2CredentialsFunction.Arn
+      RotationRules:
+        AutomaticallyAfterDays: !Ref RotationDays
