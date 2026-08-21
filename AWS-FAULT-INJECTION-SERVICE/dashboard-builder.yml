@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Shared Lambda function for building ECS DR FIS CloudWatch dashboards dynamically.
+  Deploy once per account. Referenced by per-cluster dashboard stacks.
+
+Resources:
+
+  DashboardBuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Bounded-DashboardBuilderRole
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/BoundedPermissionsPolicy"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DashboardAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutDashboard
+                  - cloudwatch:DeleteDashboards
+                Resource: "*"
+
+  DashboardBuilderFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: DR-FIS-DashboardBuilder
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt DashboardBuilderRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json, boto3, urllib.request, traceback
+
+          cw = boto3.client("cloudwatch")
+
+          def send(event, context, status, data={}, reason=""):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason or "See CloudWatch logs",
+                  "PhysicalResourceId": event.get("PhysicalResourceId", event["LogicalResourceId"]),
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "Data": data,
+              }).encode()
+              req = urllib.request.Request(event["ResponseURL"], data=body, method="PUT",
+                                           headers={"Content-Type": ""})
+              urllib.request.urlopen(req)
+
+          def dashboard_name(p):
+              return f"{p['ClusterName']}-{p['Environment']}-DR-FIS-Monitor"
+
+          def build_body(p):
+              cluster      = p["ClusterName"]
+              prefix       = p["ServicePrefix"]
+              env          = p["Environment"]
+              region       = p["Region"]
+              az           = p["DisruptedAZ"]
+              int_alb_name = p["InternalALBName"]
+              int_alb_sfx  = p["InternalALBSuffix"]
+              ext_alb_name = p["ExternalALBName"]
+              ext_alb_sfx  = p["ExternalALBSuffix"]
+              services     = [s.strip() for s in p["Services"].split(",") if s.strip()]
+
+              def alb_search(namespace, metric, alb_sfx, eid):
+                  return (
+                      f'SEARCH(\'{{{namespace}}} MetricName="{metric}" '
+                      f'LoadBalancer="{alb_sfx}"\', "Average", 60)'
+                  )
+
+              widgets = [
+                  {"type": "text", "x": 0, "y": 0, "width": 24, "height": 2,
+                   "properties": {"markdown": (
+                       f"## {cluster} — ECS DR FIS Monitor | "
+                       f"**Env:** {env} | **Region:** {region} | **Disrupted AZ:** {az}"
+                   )}},
+                  {"type": "text", "x": 0, "y": 2, "width": 24, "height": 1,
+                   "properties": {"markdown": "## ALB Health — Healthy vs Unhealthy Hosts per Target Group"}},
+                  {"type": "metric", "x": 0, "y": 3, "width": 12, "height": 6,
+                   "properties": {
+                       "title": f"{int_alb_name} — Healthy Host Count (all TGs)",
+                       "metrics": [[{"expression": alb_search("AWS/ApplicationELB,LoadBalancer,TargetGroup", "HealthyHostCount", int_alb_sfx, "e1"), "id": "e1", "label": ""}]],
+                       "view": "timeSeries", "period": 60, "region": region}},
+                  {"type": "metric", "x": 12, "y": 3, "width": 12, "height": 6,
+                   "properties": {
+                       "title": f"{int_alb_name} — Unhealthy Host Count (all TGs)",
+                       "metrics": [[{"expression": alb_search("AWS/ApplicationELB,LoadBalancer,TargetGroup", "UnHealthyHostCount", int_alb_sfx, "e2"), "id": "e2", "label": "", "color": "#d62728"}]],
+                       "view": "timeSeries", "period": 60, "region": region}},
+                  {"type": "metric", "x": 0, "y": 9, "width": 12, "height": 6,
+                   "properties": {
+                       "title": f"{ext_alb_name} — Healthy Host Count (all TGs)",
+                       "metrics": [[{"expression": alb_search("AWS/ApplicationELB,LoadBalancer,TargetGroup", "HealthyHostCount", ext_alb_sfx, "e3"), "id": "e3", "label": ""}]],
+                       "view": "timeSeries", "period": 60, "region": region}},
+                  {"type": "metric", "x": 12, "y": 9, "width": 12, "height": 6,
+                   "properties": {
+                       "title": f"{ext_alb_name} — Unhealthy Host Count (all TGs)",
+                       "metrics": [[{"expression": alb_search("AWS/ApplicationELB,LoadBalancer,TargetGroup", "UnHealthyHostCount", ext_alb_sfx, "e4"), "id": "e4", "label": "", "color": "#d62728"}]],
+                       "view": "timeSeries", "period": 60, "region": region}},
+                  {"type": "text", "x": 0, "y": 15, "width": 24, "height": 1,
+                   "properties": {"markdown": "## ECS — Running Task Count (blue+green) | Healthy Hosts by AZ per Service"}},
+              ]
+
+              for i, svc in enumerate(services):
+                  y = 16 + (i * 6)
+                  full = f"{prefix}-{svc}" if prefix else svc
+                  widgets.append({
+                      "type": "metric", "x": 0, "y": y, "width": 12, "height": 6,
+                      "properties": {
+                          "title": f"{full} — Running Tasks",
+                          "metrics": [
+                              ["ECS/ContainerInsights", "RunningTaskCount", "ClusterName", cluster, "ServiceName", f"{full}-blue",  {"label": "blue"}],
+                              ["ECS/ContainerInsights", "RunningTaskCount", "ClusterName", cluster, "ServiceName", f"{full}-green", {"label": "green"}],
+                          ],
+                          "view": "timeSeries", "stat": "Average", "period": 60, "region": region,
+                      }
+                  })
+                  widgets.append({
+                      "type": "metric", "x": 12, "y": y, "width": 12, "height": 6,
+                      "properties": {
+                          "title": f"{full} — Healthy Hosts by AZ",
+                          "metrics": [[{
+                              "expression": f'SEARCH(\'{{AWS/ApplicationELB,AvailabilityZone,LoadBalancer,TargetGroup}} MetricName="HealthyHostCount" LoadBalancer="{int_alb_sfx}" {full}\', "Average", 60)',
+                              "id": f"az{i:02d}", "label": "",
+                          }]],
+                          "view": "timeSeries", "period": 60, "region": region,
+                      }
+                  })
+
+              return json.dumps({"widgets": widgets})
+
+          def handler(event, context):
+              p = event.get("ResourceProperties", {})
+              name = dashboard_name(p)
+              try:
+                  if event["RequestType"] == "Delete":
+                      cw.delete_dashboards(DashboardNames=[name])
+                      send(event, context, "SUCCESS")
+                      return
+                  body = build_body(p)
+                  cw.put_dashboard(DashboardName=name, DashboardBody=body)
+                  send(event, context, "SUCCESS", {"DashboardName": name})
+              except Exception:
+                  send(event, context, "FAILED", reason=traceback.format_exc())
+
+Outputs:
+  FunctionArn:
+    Value: !GetAtt DashboardBuilderFn.Arn
+    Description: Pass this as BuilderFunctionArn to each dashboard stack
+    Export:
+      Name: DR-FIS-DashboardBuilder-Arn
