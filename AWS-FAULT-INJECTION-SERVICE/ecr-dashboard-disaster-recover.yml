@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  ECS DR FIS monitoring dashboard for a single cluster.
+  Requires dashboard-builder.yaml to be deployed first in the same account.
+
+Parameters:
+
+  ClusterName:
+    Type: String
+
+  ServicePrefix:
+    Type: String
+    Default: ""
+
+  Environment:
+    Type: String
+    AllowedValues: [dev, sit, prod]
+    Default: sit
+
+  Services:
+    Type: String
+    Description: Comma-separated base service names (e.g. configserver,cp-gateway,tiles)
+
+  InternalALBName:
+    Type: String
+    Default: ""
+
+  InternalALBSuffix:
+    Type: String
+    Default: ""
+
+  ExternalALBName:
+    Type: String
+    Default: ""
+
+  ExternalALBSuffix:
+    Type: String
+    Default: ""
+
+  DisruptedAZ:
+    Type: String
+    Default: af-south-1a
+    AllowedValues: [af-south-1a, af-south-1b, af-south-1c]
+
+  BuilderFunctionArn:
+    Type: String
+    Description: ARN of the shared DR-FIS-DashboardBuilder Lambda (output of dashboard-builder.yaml)
+
+  TCKey:  { Type: String }
+  UTRKey: { Type: String }
+
+Resources:
+
+  ECSClusterDashboard:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !Ref BuilderFunctionArn
+      ClusterName:       !Ref ClusterName
+      ServicePrefix:     !Ref ServicePrefix
+      Environment:       !Ref Environment
+      Region:            !Ref AWS::Region
+      DisruptedAZ:       !Ref DisruptedAZ
+      Services:          !Ref Services
+      InternalALBName:   !Ref InternalALBName
+      InternalALBSuffix: !Ref InternalALBSuffix
+      ExternalALBName:   !Ref ExternalALBName
+      ExternalALBSuffix: !Ref ExternalALBSuffix
+
+Outputs:
+  DashboardName:
+    Value: !GetAtt ECSClusterDashboard.DashboardName
+    Description: CloudWatch Dashboard name
+  DashboardURL:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ClusterName}-${Environment}-DR-FIS-Monitor"
+    Description: Direct link to CloudWatch Dashboard
