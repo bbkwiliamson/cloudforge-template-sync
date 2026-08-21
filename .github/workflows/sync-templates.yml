@@ -1,0 +1,33 @@
+name: Sync Templates to S3
+#
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  sync:
+    runs-on: codebuild-dp-systems-enablement-iac-runner-${{ github.run_id }}-${{ github.run_attempt }} #self-hosted codebuild runners.
+    permissions:
+      # id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::573185292006:role/Bounded-GitHubActionsRole-dp-systems-enablement-Github-Runners
+          aws-region: af-south-1
+
+      - name: Sync templates to S3
+        run: |
+          aws s3 sync . s3://cloudforge-templates-bucket/ \
+            --delete \
+            --exclude ".git/*" \
+            --exclude ".github/*" \
+            --exclude ".vscode/*" \
+            --exclude "azure-pipelines.yml" \
+            --exclude "README.md"
