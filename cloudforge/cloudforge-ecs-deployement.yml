@@ -1,0 +1,583 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudForge ECS Deployment with Internal ALB and Auto Scaling'
+
+Parameters:
+  VpcId:
+    Type: String
+    Default: {vpc id}
+    Description: VPC ID for deployment
+  
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+    Default: {subnetsIDs}
+    Description: Private subnet IDs for ALB and ECS
+  
+  ECRRepository:
+    Type: String
+    Default: "573185292006.dkr.ecr.af-south-1.amazonaws.com/cloudforge/cloudforge:PROD-2.1.0"
+    Description: ECR repository URI with image tag
+  
+  CertificateArn:
+    Type: String
+    Default: "arn:aws:acm:af-south-1:573185292006:certificate/d70f5811-726f-4441-943f-232fad2495ca"
+    Description: ACM Certificate ARN for HTTPS
+  
+  CloudforgeSecret:
+    Type: String
+    Default: "cloudforge/secrets/itsm-service-accounts"
+    Description: Secrets Manager secret name for ITSM credentials
+
+  CloudforgeTemplatesBucket:
+    Type: String
+    Default: "cloudforge-templates-bucket"
+    Description: S3 bucket name for CloudForge templates
+
+  CloudforgeProdAccountLIST:
+    Type: String
+    Default: "cloudforge/secrets/prod-accounts-list"
+    Description: Secrets Manager secret name for Cloudforge prod account list
+  CloudforgeUatAccountLIST:
+    Type: String
+    Default: cloudforge/secrets/non-prod-accounts-list
+    Description: Secrets Manager secret name for Cloudforge non-prod[Dev/Test/SIT] account list
+
+Resources:
+  # Secrets Manager Secret for non-prod account list
+  CloudForgeAccountUATListSecret:
+    Type: AWS::SecretsManager::Secret
+    # DeletionPolicy: Retain
+    Properties:
+      Name: !Ref CloudforgeUatAccountLIST
+      Description: CloudForge non-PROD Account list Validation (the list value is comma separated)
+      SecretString: !Sub |
+        {
+          "accounts": [
+            {"accountId": "735721437522", "description": "Dev - Customer Mobile Platform"},
+            {"accountId": "183723809405", "description": "SIT - Customer Mobile Platform"},
+            {"accountId": "952337168961", "description": "Non-Prod - Home Services"},
+            {"accountId": "324152852735", "description": "Non-Prod - Digital Money Manager"},
+            {"accountId": "866715056275", "description": "Non-Prod - Obsidian Zero Billing"},
+            {"accountId": "023226652074", "description": "Non-Prod - Internet banking Offshore"},
+            {"accountId": "109965294401", "description": "Dev - DP Admin Portal (Staff Web)"},
+            {"accountId": "159146960395", "description": "Dev - Add On Store"},
+            {"accountId": "221082184884", "description": "SIT - UCount"},
+            {"accountId": "014197137390", "description": "Dev - UCount"},
+            {"accountId": "221082184884", "description": "Non-Prod - Rewards"},
+            {"accountId": "830087179315", "description": "Non-Prod - Doxim ICE Platform"},
+            {"accountId": "851395369928", "description": "SIT - DIGA Crypto Banking"},
+            {"accountId": "034283564893", "description": "Non-Prod - Insurance and Asset Management| Private Clients"},
+            {"accountId": "990017328250", "description": "UAT - DIGA Crypto Banking"},
+            {"accountId": "322355024833", "description": "Non-Prod - Weath Account| Insurance and Asset Management| Goalsetter"},
+            {"accountId": "110248914005", "description": "Non-Prod - CAM Limits Management"},
+            {"accountId": "390402567281", "description": "Non-Prod - Beneficiary & Limits Management"},
+            {"accountId": "381491927315", "description": "Non-Prod - USSD"},
+            {"accountId": "321360885483", "description": "Non-Prod - Insurance and Asset Management| STL Track an Estate"},
+            {"accountId": "850995568056", "description": "Non-Prod - credit card account origination"},
+            {"accountId": "143135240683", "description": "Non-Prod - Public Web Platform"},
+            {"accountId": "143135240683", "description": "Non-Prod - VAF Domain Service"}
+          ]
+        }
+
+      Tags:
+        - Key: Name
+          Value: CloudForge-non-prod-account-list-Secret
+        - Key: Environment
+          Value: sit
+        - Key: GroupName
+          Value: sbgdevops
+        - Key: TeamEmail
+          Value: Sbg-DevOps-CloudEngineering@standardbank.co.za
+ 
+  #Secrets Manager for prod accounts list
+  CloudForgeAccountListSecret:
+    Type: AWS::SecretsManager::Secret
+    # DeletionPolicy: Retain
+    Properties:
+      Name: !Ref CloudforgeProdAccountLIST
+      Description: CloudForge PROD Account list Validation (the list value is comma separated)
+      SecretString: !Sub |
+        {
+          "accounts": [
+            {"accountId": "662040593462", "description": "Prod - Customer Mobile Platform"},
+            {"accountId": "097289624731", "description": "Prod - Home Services"},
+            {"accountId": "471112716457", "description": "Prod - Digital Money Manager"},
+            {"accountId": "266854448513", "description": "Prod - Obsidian Zero Billing"},
+            {"accountId": "688342732273", "description": "Prod - Internet banking Offshore"},
+            {"accountId": "190536913790", "description": "Prod - DP Admin Portal (Staff Web)"},
+            {"accountId": "527937983484", "description": "Prod - Insurance and Asset Management| Private Clients"},
+            {"accountId": "510282650585", "description": "Prod - Weath Account| Insurance and Asset Management| Goalsetter"},
+            {"accountId": "550572126545", "description": "Prod - Add On Store"},
+            {"accountId": "084375565855", "description": "Prod - UCount"},
+            {"accountId": "737505187257", "description": "Prod - DIGA Crypto Banking Tooling"},
+            {"accountId": "390402567281", "description": "Prod - Beneficiary & Limits Management"},
+            {"accountId": "014115912210", "description": "Prod - USSD"},
+            {"accountId": "938654489440", "description": "Prod - Insurance and Asset Management| STL Track an Estate"},
+            {"accountId": "651706781222", "description": "Prod - credit-card-account-origination"},
+            {"accountId": "930946037264", "description": "Prod - Public Web Platform"},
+            {"accountId": "307946640788", "description": "Prod - VAF Domain Service"},
+            {"accountId": "573185292006", "description": "Prod - Tooling Account"}
+          ]
+        }
+      Tags:
+        - Key: Name
+          Value: CloudForge-prod-account-list-Secret
+        - Key: Environment
+          Value: sit
+        - Key: GroupName
+          Value: sbgdevops
+        - Key: TeamEmail
+          Value: Sbg-DevOps-CloudEngineering@standardbank.co.za
+  
+  #Secrets Manager Secret for ITSM credentials
+  ITSMSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Ref CloudforgeSecret
+      Description: ITSM service account credentials for CloudForge
+      SecretString: !Sub |
+        {
+          "username": "REPLACE_WITH_ACTUAL_USERNAME",
+          "password": "REPLACE_WITH_ACTUAL_PASSWORD"
+        }
+      Tags:
+        - Key: Name
+          Value: CloudForge-ITSM-Secret
+        - Key: Environment
+          Value: sit
+        - Key: GroupName
+          Value: sbgdevops
+        - Key: TeamEmail
+          Value: Sbg-DevOps-CloudEngineering@standardbank.co.za
+
+  # CloudWatch Log Group
+  CloudForgeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/cloudforge
+      RetentionInDays: 14
+
+  # ECS Cluster
+  CloudForgeCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: cloudforge
+      Tags:
+        - Key: Name
+          Value: CloudForge-Cluster
+        - Key: HoursOfOperation
+          Value: sbg_custom
+        - Key: Environment
+          Value: sit
+        - Key: GroupName
+          Value: sbgdevops
+        - Key: TeamEmail
+          Value: Sbg-DevOps-CloudEngineering@standardbank.co.za
+        - Key: Tier
+          Value: MCA
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
+  # ECS Task Execution Role
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Bounded-cloudforge-execution-role
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/BoundedPermissionsPolicy"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: Bounded-ECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: '*'
+        - PolicyName: Bounded-CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt CloudForgeLogGroup.Arn
+
+  # ECS Task Role (for application permissions)
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Bounded-cloudforge-task-role
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/BoundedPermissionsPolicy"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: Bounded-CloudFormationFullAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:*
+                  - sts:GetCallerIdentity
+                  - iam:*
+                  - lambda:*
+                  - s3:*
+                  - ec2:*
+                  - logs:*
+                Resource: '*'
+        - PolicyName: Bounded-AssumeRoleAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: 'arn:aws:iam::*:role/Bounded-Cloudforge-DevPortal-cross-Account'
+        - PolicyName: Bounded-CloudForgeTemplatesBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${CloudforgeTemplatesBucket}'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${CloudforgeTemplatesBucket}/*'
+        - PolicyName: Bounded-SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: 
+                  - !Ref ITSMSecret
+                  - !Ref CloudForgeAccountListSecret
+                  - !Ref CloudForgeAccountUATListSecret
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:*:secret:cloudforge/allowed-users*'
+
+  # ALB Security Group
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: cloudforge-alb-sg
+      GroupDescription: Security group for CloudForge ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 172.17.0.0/16
+          Description: VPN Access 172.17.0.0/16
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 172.16.0.0/16
+          Description: VPN Access 172.16.0.0/16
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.0.0.0/8
+          Description: VPN Access 10.0.0.0/8
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 172.17.0.0/16
+          Description: VPN HTTPS Access 172.17.0.0/16
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 172.16.0.0/16
+          Description: VPN HTTPS Access 172.16.0.0/16
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/8
+          Description: VPN HTTPS Access 10.0.0.0/8
+
+  # ECS Security Group
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: cloudforge-ecs-sg
+      GroupDescription: Security group for CloudForge ECS tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Allow traffic from ALB
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS outbound for ITSM API calls
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP outbound
+        - IpProtocol: tcp
+          FromPort: 2030
+          ToPort: 2030
+          CidrIp: 0.0.0.0/0
+          Description: ITSM Web Service access on port 2030
+        - IpProtocol: tcp
+          FromPort: 2031
+          ToPort: 2031
+          CidrIp: 0.0.0.0/0
+          Description: ITSM Web Service access on port 2031
+        - IpProtocol: tcp
+          FromPort: 3269
+          ToPort: 3269
+          CidrIp: 0.0.0.0/0
+          Description: LDAPS access for authentication
+        - IpProtocol: tcp
+          FromPort: 389
+          ToPort: 389
+          CidrIp: 0.0.0.0/0
+          Description: LDAP access for authentication
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: cloudforge-alb
+      Scheme: internal
+      Type: application
+      Subnets: !Ref PrivateSubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: CloudForge-ALB
+        - Key: HoursOfOperation
+          Value: sbg_custom
+        - Key: Environment
+          Value: sit
+        - Key: GroupName
+          Value: sbgdevops
+        - Key: TeamEmail
+          Value: Sbg-DevOps-CloudEngineering@standardbank.co.za
+        - Key: Tier
+          Value: MCA
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cloudforge-tg
+      Port: 3000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  # ALB HTTPS Listener
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+
+  # ALB HTTP Listener (redirects to HTTPS)
+  ALBHTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: 443
+            StatusCode: HTTP_301
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # ECS Task Definition
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: cloudforge
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: cloudforge
+          Image: !Ref ECRRepository
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudForgeLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: PORT
+              Value: "3000"
+            - Name: PYTHONUNBUFFERED
+              Value: "1"
+            - Name: FLASK_ENV
+              Value: "production"
+            - Name: TEMPLATES_BUCKET
+              Value: !Ref CloudforgeTemplatesBucket
+          Essential: true
+          LinuxParameters:
+            InitProcessEnabled: true
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: cloudforge-service
+      Cluster: !Ref CloudForgeCluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: 2
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets: !Ref PrivateSubnetIds
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: cloudforge
+          ContainerPort: 3000
+          TargetGroupArn: !Ref TargetGroup
+      ServiceRegistries:
+        - RegistryArn: !GetAtt ServiceDiscovery.Arn
+
+  # Service Discovery
+  ServiceDiscoveryNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: cloudforge
+      Vpc: !Ref VpcId
+
+  ServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: cloudforge-service
+      NamespaceId: !Ref ServiceDiscoveryNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+        NamespaceId: !Ref ServiceDiscoveryNamespace
+
+  # Auto Scaling Target
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 2
+      ResourceId: !Sub service/${CloudForgeCluster}/${ECSService.Name}
+      RoleARN: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  # Auto Scaling Policy
+  AutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: cloudforge-cpu-scaling
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+  # Route 53 Private Hosted Zone Record
+  # PrivateDNSRecord:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     HostedZoneId: Z1D633PJN98FT9  # Replace with your private hosted zone ID
+  #     Name: cloudforge.standardbank.co.za
+  #     Type: A
+  #     AliasTarget:
+  #       DNSName: !GetAtt ApplicationLoadBalancer.DNSName
+  #       HostedZoneId: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+
+Outputs:
+  ClusterName:
+    Description: ECS Cluster Name
+    Value: !Ref CloudForgeCluster
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterName
+
+  ServiceName:
+    Description: ECS Service Name
+    Value: !Ref ECSService
+    Export:
+      Name: !Sub ${AWS::StackName}-ServiceName
+
+  LoadBalancerDNS:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-LoadBalancerDNS
+
+  TargetGroupArn:
+    Description: Target Group ARN
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-TargetGroupArn
+
+  LogGroupName:
+    Description: CloudWatch Log Group Name
+    Value: !Ref CloudForgeLogGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-LogGroupName
+
+  ApplicationURL:
+    Description: Application URL
+    Value: !Sub https://cloudforge.standardbank.co.za
+    Export:
+      Name: !Sub ${AWS::StackName}-ApplicationURL
