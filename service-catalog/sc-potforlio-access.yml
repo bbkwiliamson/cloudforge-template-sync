@@ -1,0 +1,242 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Service Catalog portfolio access enforcement Lambda (principals-only model)
+
+Parameters:
+
+  LambdaFunctionName:
+    Type: String
+    Default: service-catalog-potfolio-access-lambda
+
+  LambdaRoleName:
+    Type: String
+    Default: Bounded-service-catalog-lambda-potfolio-role
+
+  SecretName:
+    Type: String
+    Default: service-catalog-potfolio-access
+
+  LogGroupName:
+    Type: String
+    Default: /aws/lambda/service-catalog-potfolio-access-lambda
+  TeamName:
+    Type: String
+    Description: Team name for resource tagging
+  ENV:
+    Type: String
+    Description: Environment for resource tagging
+    AllowedValues:
+      - prod
+      - dev
+      - sit 
+      - poc
+      - PROD
+      - SIT
+      - POC
+      - DEV
+
+
+Resources:
+  MySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Ref SecretName
+      Description: Secret with default principals configuration. e.g ["role arn","user arn"]
+      SecretString: !Sub  '{"principals":["arn:aws:iam::${AWS::AccountId}:role/Bounded-Cloudforge-DevPortal-cross-Account"]}'
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunctionName}"
+      RetentionInDays: 1
+
+  ServiceCatalogLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref LambdaRoleName
+      PermissionsBoundary: !Sub 'arn:aws:iam::${AWS::AccountId}:policy/BoundedPermissionsPolicy'
+      Tags:
+        - Key: GroupName
+          Value: !Ref TeamName
+        - Key: HoursOfOperation
+          Value: sbg_custom
+        - Key: Environment
+          Value: !Ref ENV
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+      Policies:
+        - PolicyName: Bounded-service-catalog-portfolio-access-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              - Sid: CreateLogGroup
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${LambdaFunctionName}:*"
+
+              - Sid: WriteLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${LambdaFunctionName}:log-stream:*"
+
+              - Sid: SecretsManagerAccess
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretName}-*"
+
+              - Sid: ServiceCatalogAccess
+                Effect: Allow
+                Action:
+                  - servicecatalog:*
+                Resource: "*"
+
+              - Sid: IAMReadAccess
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                Resource: "*"
+
+  ServiceCatalogPortfolioAccessLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 300
+      MemorySize: 256
+      Role: !GetAtt ServiceCatalogLambdaRole.Arn
+      Tags:
+        - Key: GroupName
+          Value: !Ref TeamName
+        - Key: HoursOfOperation
+          Value: sbg_custom
+        - Key: Environment
+          Value: !Ref ENV
+      Environment:
+        Variables:
+          SECRET_NAME: !Ref SecretName
+          LOG_GROUP_NAME: !Ref LogGroupName
+
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          sc = boto3.client("servicecatalog")
+          secrets = boto3.client("secretsmanager")
+
+          def get_principals():
+              secret_name = os.environ["SECRET_NAME"]
+
+              response = secrets.get_secret_value(
+                  SecretId=secret_name
+              )
+
+              secret = json.loads(response["SecretString"])
+
+              return secret.get("principals", [])
+
+          def lambda_handler(event, context):
+
+              principals = get_principals()
+              print(f"Principals from secret: {principals}")
+
+              portfolio_count = 0
+              portfolios = []
+
+              # Local portfolios
+              for page in sc.get_paginator("list_portfolios").paginate():
+                  for portfolio in page["PortfolioDetails"]:
+                      portfolios.append(portfolio)
+
+              # Imported/shared portfolios
+              for share_type in ["IMPORTED", "AWS_SERVICECATALOG", "AWS_ORGANIZATIONS"]:
+                  try:
+                      for page in sc.get_paginator("list_accepted_portfolio_shares").paginate(PortfolioShareType=share_type):
+                          for portfolio in page["PortfolioDetails"]:
+                              portfolios.append(portfolio)
+                  except Exception as e:
+                      print(f"Error listing {share_type} shares: {str(e)}")
+
+              for portfolio in portfolios:
+                      portfolio_count += 1
+                      portfolio_id = portfolio["Id"]
+                      portfolio_name = portfolio["DisplayName"]
+                      print(f"Processing portfolio: {portfolio_name} ({portfolio_id})")
+
+                      existing = set()
+
+                      try:
+                          for p_page in sc.get_paginator(
+                              "list_principals_for_portfolio"
+                          ).paginate(PortfolioId=portfolio_id):
+
+                              for p in p_page["Principals"]:
+                                  existing.add(p["PrincipalARN"])
+                      except sc.exceptions.ResourceNotFoundException:
+                          print(f"Skipping {portfolio_name} - not manageable from this account")
+                          continue
+
+                      print(f"Existing principals: {existing}")
+
+                      for principal in principals:
+
+                          if principal in existing:
+                              print(f"Skipping {principal} - already exists on {portfolio_name}")
+                              continue
+
+                          try:
+                              sc.associate_principal_with_portfolio(
+                                  PortfolioId=portfolio_id,
+                                  PrincipalARN=principal,
+                                  PrincipalType="IAM"
+                              )
+                              print(f"Added {principal} to {portfolio_name}")
+
+                          except Exception as e:
+                              print(f"Error adding {principal}: {str(e)}")
+
+              print(f"Total portfolios found: {portfolio_count}")
+              return {"statusCode": 200}
+
+  # EVENTBRIDGE SCHEDULE (04:00 SAST = 02:00 UTC)
+  DailySchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: service-catalog-portfolio-access-daily
+      ScheduleExpression: cron(0 2 * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ServiceCatalogPortfolioAccessLambda.Arn
+          Id: LambdaTarget
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ServiceCatalogPortfolioAccessLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailySchedule.Arn
+
+Outputs:
+
+  LambdaName:
+    Value: !Ref LambdaFunctionName
+
+  RoleName:
+    Value: !Ref LambdaRoleName
+
+  LogGroupName:
+    Value: !Ref LogGroupName
